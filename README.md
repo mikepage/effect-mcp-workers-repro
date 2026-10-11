@@ -19,16 +19,28 @@ the request just sits until the client gives up, logged as `canceled` with
 
 ## Result (effect 4.0.0, wrangler 4.147.0)
 
+Every scenario runs twice: on Effect's default scheduler and on the sync
+scheduler, the workaround below (`/sync/...` routes).
+
 ```
-FAIL fiber: a second request uses the long-lived fiber
-       GET /fiber/wait     expected 200  got 200
-       GET /fiber/wait     expected 200  got hang
-FAIL fiber: first request answers before the fiber has run
-       GET /fiber/nowait   expected 200  got 200
-       GET /fiber/wait     expected 200  got hang
-ok   mcp: first request is tools/list (control)
-ok   mcp: first request is a GET (405, never touches the server fiber)
-ok   mcp: first tools/list is cancelled by the client
+FAIL [default] fiber: a second request uses the long-lived fiber
+       GET /fiber/wait          expected 200  got 200
+       GET /fiber/wait          expected 200  got hang
+FAIL [default] fiber: first request answers before the fiber has run
+       GET /fiber/nowait        expected 200  got 200
+       GET /fiber/wait          expected 200  got hang
+ok   [default] mcp: first request is tools/list (control)
+ok   [default] mcp: first request is a GET (405, never touches the server fiber)
+ok   [default] mcp: first tools/list is cancelled by the client
+ok   [sync] fiber: a second request uses the long-lived fiber
+ok   [sync] fiber: first request answers before the fiber has run
+ok   [sync] mcp: first request is tools/list (control)
+ok   [sync] mcp: first request is a GET (405, never touches the server fiber)
+ok   [sync] mcp: first tools/list is cancelled by the client
+
+A /ping sent while a busy fiber (500k operations) runs on the same isolate:
+       [default] /ping answered after 8 ms; the busy request took 429 ms
+       [sync] /ping answered after 12 ms; the busy request took 32 ms
 ```
 
 The minimal `McpServer` here does not hang. The console's did, on the same
@@ -54,6 +66,45 @@ scenarios show.
 has exactly this shape. The console worked around it with a warm-up: one
 `tools/list` per endpoint before the isolate's first `/mcp` request, with a
 10 s bound on waiting for another request's warm-up.
+
+## Workaround: the sync scheduler
+
+```ts
+import { Layer, Scheduler } from "effect"
+
+const SyncSchedulerLive = Layer.succeed(
+  Scheduler.Scheduler,
+  new Scheduler.MixedScheduler("sync")
+)
+
+// The whole app: provided to the layer, so the McpServer fiber and every
+// request fiber get it.
+const app = HttpRouter.toWebHandler(
+  AppLive.pipe(Layer.provideMerge(SyncSchedulerLive))
+)
+
+// A single run: Effect.provideService(effect, Scheduler.Scheduler, sync)
+```
+
+`MixedScheduler("sync")` runs a fiber's next turn in a microtask instead of
+a `setImmediate`/`setTimeout(0)`. A microtask is never left pending in a
+request's timer list, so no request takes it along when it ends. With it all
+scenarios pass.
+
+What it costs, from the `/ping` measurement:
+
+- A fiber no longer hands the isolate back between its turns: a request that
+  arrives while another runs a CPU-heavy fiber waits until that fiber is
+  done or does I/O. Above, `/ping` waited for the rest of the busy run.
+- The same fiber runs much faster: 32 ms instead of 429 ms for 500k
+  operations, since workerd's `setImmediate`/`setTimeout(0)` per yield is
+  slow.
+- `Effect.sleep`, timeouts and schedules still use real timers, which belong
+  to the request that set them. A long-lived fiber that sleeps still dies with
+  that request. The workaround fixes the scheduler, not the shape.
+
+Use it as a safety net; a Worker should still keep nothing alive past its
+request (below).
 
 ## Wrong shape for Workers
 
