@@ -55,6 +55,35 @@ has exactly this shape. The console worked around it with a warm-up: one
 `tools/list` per endpoint before the isolate's first `/mcp` request, with a
 10 s bound on waiting for another request's warm-up.
 
+## Wrong shape for Workers
+
+A long-lived fiber behind a Worker's fetch handler is bad practice. A Worker
+has no lifetime of its own beyond a request: nothing should outlive the
+request that started it, and nothing should be driven by whichever request
+happens to come along next.
+
+`McpServer` has that shape because Effect built one server for every
+transport. It sits on `RpcServer`, which was made for long connections
+(stdio, websockets): one loop reads messages, dispatches them and writes
+replies for as long as the connection lives. It also owns what happens
+between requests: progress notifications, server-to-client requests
+(sampling, elicitation), cancellation by request id. `layerHttp` is an
+adapter on top: each POST drops its message into the loop's inbox
+(`RpcServer.makeProtocolWithHttpEffect`) and waits for the reply to come back
+out. The request only waits; the shared loop does the work.
+
+That shape is fine in Node, Bun or a Durable Object, where the loop has
+somewhere to live. On a Worker it isn't. A stateless `tools/list` or
+`tools/call` could run start to finish in the request's own fiber, with no
+inbox and no shared loop, but Effect doesn't offer that mode. So either:
+
+- keep the loop somewhere that outlives requests: a Durable Object, or
+- write your own request-scoped handler for the JSON-RPC methods you need,
+  running each tool call in the request's fiber.
+
+A warm-up that sends a request first, like the console's, only hides the
+problem; it doesn't change the shape.
+
 Removing MCP didn't fix the scheduler. It removed the only fiber that
 outlived a request: every `/api` request runs in its own fiber, which starts
 and finishes inside that request.
@@ -81,9 +110,9 @@ answer.
 
 ## For the next Effect project with an MCP server
 
-- Don't put a long-lived fiber behind a Worker's fetch handler. Put the MCP
-  server in a Durable Object, or keep every tool call inside the request's
-  own fiber.
+- Don't use `McpServer.layerHttp` in a Worker's fetch handler, and don't put
+  any other long-lived fiber there (see Wrong shape for Workers). Put the MCP
+  server in a Durable Object, or write a request-scoped handler.
 - Or skip MCP: a CLI generated from the `HttpApi` contract
   (`HttpApi.reflect`) gave every endpoint as a command with the web app's
   auth and roles, and nothing extra to run.
