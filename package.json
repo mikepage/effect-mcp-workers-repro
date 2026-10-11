@@ -1,0 +1,16 @@
+{
+  "name": "effect-mcp-workers-repro",
+  "private": true,
+  "type": "module",
+  "description": "Effect 4 McpServer on Cloudflare Workers: MCP requests hang when the server fiber was started by a request that ended first",
+  "license": "MIT",
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "4.147.0"
+  }
+}
